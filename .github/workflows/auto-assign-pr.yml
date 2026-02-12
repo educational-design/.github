@@ -1,40 +1,83 @@
 name: Auto Assign PR Reviewer and Assignee
 
 on:
-  pull_request:
-    types: [opened]
+  schedule:
+    # Run every 5 minutes
+    - cron: '*/5 * * * *'
+  workflow_dispatch:
 
 jobs:
   assign:
     runs-on: ubuntu-latest
-    permissions:
-      pull-requests: write
     steps:
-      - name: Assign PR creator as assignee
+      - name: Auto assign reviewer and assignee for new PRs
         uses: actions/github-script@v7
         with:
+          github-token: ${{ secrets.ORG_GITHUB_TOKEN }}
           script: |
-            const prNumber = context.payload.pull_request.number;
-            const prCreator = context.payload.pull_request.user.login;
+            const org = 'educational-design';
+            const teamSlug = 'reviewers';
 
-            // Assign PR creator as assignee
-            await github.rest.issues.addAssignees({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              issue_number: prNumber,
-              assignees: [prCreator],
+            // Search for PRs opened in the last 10 minutes across the org without reviewers
+            const since = new Date(Date.now() - 10 * 60 * 1000).toISOString();
+            const query = `org:${org} is:pr is:open created:>=${since}`;
+
+            const { data: searchResult } = await github.rest.search.issuesAndPullRequests({
+              q: query,
+              sort: 'created',
+              order: 'desc',
+              per_page: 100,
             });
-            core.info(`Assigned ${prCreator} as assignee`);
 
-            // Request review from the reviewers team
-            try {
-              await github.rest.pulls.requestReviewers({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
+            core.info(`Found ${searchResult.total_count} recent open PRs`);
+
+            for (const item of searchResult.items) {
+              const [owner, repo] = item.repository_url.split('/').slice(-2);
+              const prNumber = item.number;
+              const prCreator = item.user.login;
+
+              // Check if reviewers are already assigned
+              const { data: pr } = await github.rest.pulls.get({
+                owner,
+                repo,
                 pull_number: prNumber,
-                team_reviewers: ['reviewers'],
               });
-              core.info('Requested review from @educational-design/reviewers');
-            } catch (error) {
-              core.warning(`Failed to request team review: ${error.message}`);
+
+              const hasReviewers = pr.requested_reviewers.length > 0 || pr.requested_teams.length > 0;
+              const hasAssignee = pr.assignees.length > 0;
+
+              if (hasReviewers && hasAssignee) {
+                core.info(`PR ${owner}/${repo}#${prNumber} already has reviewers and assignees, skipping`);
+                continue;
+              }
+
+              // Assign PR creator as assignee
+              if (!hasAssignee) {
+                try {
+                  await github.rest.issues.addAssignees({
+                    owner,
+                    repo,
+                    issue_number: prNumber,
+                    assignees: [prCreator],
+                  });
+                  core.info(`Assigned ${prCreator} as assignee on ${owner}/${repo}#${prNumber}`);
+                } catch (error) {
+                  core.warning(`Failed to assign ${prCreator} on ${owner}/${repo}#${prNumber}: ${error.message}`);
+                }
+              }
+
+              // Request review from the reviewers team
+              if (!hasReviewers) {
+                try {
+                  await github.rest.pulls.requestReviewers({
+                    owner,
+                    repo,
+                    pull_number: prNumber,
+                    team_reviewers: [teamSlug],
+                  });
+                  core.info(`Requested review from @${org}/${teamSlug} on ${owner}/${repo}#${prNumber}`);
+                } catch (error) {
+                  core.warning(`Failed to request team review on ${owner}/${repo}#${prNumber}: ${error.message}`);
+                }
+              }
             }
