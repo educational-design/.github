@@ -1,0 +1,4 @@
+# Default PR reviewers for all repositories in the educational-design organization
+# This CODEOWNERS file applies as a fallback when a repository does not have its own CODEOWNERS file.
+
+* @educational-design/reviewers
